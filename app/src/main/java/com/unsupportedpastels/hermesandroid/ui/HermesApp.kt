@@ -1,5 +1,6 @@
 package com.unsupportedpastels.hermesandroid.ui
 
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.media.MediaPlayer
@@ -311,6 +312,7 @@ import com.unsupportedpastels.hermesandroid.share.SharePayload
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.theme.LocalHermesSemanticColors
 import com.unsupportedpastels.hermesandroid.voice.VoiceInputPolicy
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -6151,18 +6153,19 @@ private fun HostFileBrowserSheet(
 
     fun openPath(path: String, displayName: String) {
         scope.launch {
-            val requested = HostFileOpenPolicy.reduce(
-                openStates[path] ?: HostFileOpenUiState.Idle,
-                HostFileOpenEvent.Requested,
+            HostFileOpenPolicy.applyOpenAttempt(
+                key = path,
+                states = { openStates },
+                setStates = { openStates = it },
+                open = {
+                    openManagedHostFile(
+                        context = context,
+                        source = path,
+                        displayName = displayName,
+                        load = onLoadManagedFile,
+                    )
+                },
             )
-            openStates = openStates + (path to requested)
-            val event = openManagedHostFile(
-                context = context,
-                source = path,
-                displayName = displayName,
-                load = onLoadManagedFile,
-            )
-            openStates = openStates + (path to HostFileOpenPolicy.reduce(requested, event))
         }
     }
 
@@ -6293,14 +6296,7 @@ private fun ArtifactBrowserSheet(
             onLoadManagedFile(artifact.source).fold(
                 onSuccess = { content ->
                     runCatching {
-                        val sharedFile = withContext(Dispatchers.IO) {
-                            writeSharedArtifact(context, artifact, content.bytes)
-                        }
-                        val uri = FileProvider.getUriForFile(
-                            context,
-                            "${context.packageName}.files",
-                            sharedFile,
-                        )
+                        val uri = sharedArtifactContentUri(context, artifact, content.bytes)
                         context.startActivity(
                             Intent.createChooser(
                                 Intent(Intent.ACTION_SEND).apply {
@@ -6324,19 +6320,18 @@ private fun ArtifactBrowserSheet(
 
     fun openManaged(artifact: Artifact) {
         scope.launch {
-            val requested = HostFileOpenPolicy.reduce(
-                openStates[artifact.stableIdentity] ?: HostFileOpenUiState.Idle,
-                HostFileOpenEvent.Requested,
-            )
-            openStates = openStates + (artifact.stableIdentity to requested)
-            val event = openManagedHostFile(
-                context = context,
-                source = artifact.source,
-                displayName = artifact.displayName,
-                load = onLoadManagedFile,
-            )
-            openStates = openStates + (
-                artifact.stableIdentity to HostFileOpenPolicy.reduce(requested, event)
+            HostFileOpenPolicy.applyOpenAttempt(
+                key = artifact.stableIdentity,
+                states = { openStates },
+                setStates = { openStates = it },
+                open = {
+                    openManagedHostFile(
+                        context = context,
+                        source = artifact.source,
+                        displayName = artifact.displayName,
+                        load = onLoadManagedFile,
+                    )
+                },
             )
         }
     }
@@ -6466,19 +6461,17 @@ private fun ArtifactBrowserSheet(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.End,
                                 ) {
-                                    if (HostFileOpenPolicy.artifactOpenAvailable(artifact.origin)) {
-                                        TextButton(
-                                            enabled = openState !is HostFileOpenUiState.Opening,
-                                            onClick = { openManaged(artifact) },
-                                        ) {
-                                            Text(
-                                                if (openState is HostFileOpenUiState.Opening) {
-                                                    HostFileOpenPolicy.OPENING_LABEL
-                                                } else {
-                                                    "Open"
-                                                },
-                                            )
-                                        }
+                                    TextButton(
+                                        enabled = openState !is HostFileOpenUiState.Opening,
+                                        onClick = { openManaged(artifact) },
+                                    ) {
+                                        Text(
+                                            if (openState is HostFileOpenUiState.Opening) {
+                                                HostFileOpenPolicy.OPENING_LABEL
+                                            } else {
+                                                "Open"
+                                            },
+                                        )
                                     }
                                     TextButton(onClick = { shareManaged(artifact) }) { Text("Share") }
                                     TextButton(onClick = {
@@ -6644,25 +6637,34 @@ internal suspend fun openManagedHostFile(
             source = source,
             displayName = displayName,
         )
-        val sharedFile = withContext(Dispatchers.IO) {
-            writeSharedArtifact(context, artifact, content.bytes)
-        }
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.files",
-            sharedFile,
-        )
+        val uri = sharedArtifactContentUri(context, artifact, content.bytes)
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, content.mimeType)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        startActivity(intent)
+        withContext(Dispatchers.Main.immediate) {
+            startActivity(intent)
+        }
         HostFileOpenEvent.LaunchSucceeded
-    } catch (error: android.content.ActivityNotFoundException) {
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: ActivityNotFoundException) {
         HostFileOpenPolicy.eventForLaunchFailure(HostFileLaunchFailure.NoHandler)
-    } catch (error: Throwable) {
+    } catch (error: Exception) {
         HostFileOpenPolicy.eventForLaunchFailure(HostFileLaunchFailure.Other(error.message))
     }
+}
+
+private suspend fun sharedArtifactContentUri(
+    context: Context,
+    artifact: Artifact,
+    bytes: ByteArray,
+): Uri = withContext(Dispatchers.IO) {
+    FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.files",
+        writeSharedArtifact(context, artifact, bytes),
+    )
 }
 
 private fun writeSharedArtifact(context: Context, artifact: Artifact, bytes: ByteArray): File {

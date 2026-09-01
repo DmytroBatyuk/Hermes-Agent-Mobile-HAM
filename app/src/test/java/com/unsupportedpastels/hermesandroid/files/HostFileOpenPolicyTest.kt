@@ -1,6 +1,7 @@
 package com.unsupportedpastels.hermesandroid.files
 
 import com.unsupportedpastels.hermesandroid.artifacts.ArtifactOrigin
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -105,6 +106,26 @@ class HostFileOpenPolicyTest {
             HostFileOpenEvent.Failed("Could not download file"),
         )
         assertEquals(HostFileOpenUiState.Failed("Could not download file"), failed)
+    }
+
+    @Test
+    fun applyOpenAttemptPublishesOpeningThenResult() = runTest {
+        val snapshots = mutableListOf<Map<String, HostFileOpenUiState>>()
+        var states = emptyMap<String, HostFileOpenUiState>()
+        HostFileOpenPolicy.applyOpenAttempt(
+            key = "/tmp/notes.txt",
+            states = { states },
+            setStates = {
+                states = it
+                snapshots += it
+            },
+            open = { HostFileOpenEvent.NoAppHandler },
+        )
+        assertEquals(HostFileOpenUiState.Opening, snapshots[0]["/tmp/notes.txt"])
+        assertEquals(
+            HostFileOpenUiState.Failed(HostFileOpenPolicy.NO_HANDLER_MESSAGE),
+            snapshots[1]["/tmp/notes.txt"],
+        )
     }
 
     @Test

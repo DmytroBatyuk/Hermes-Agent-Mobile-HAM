@@ -126,7 +126,7 @@ private val imageAttachmentMarkerPattern = Regex(
 )
 private const val MESSAGE_RENDER_CHUNK_CHARS = 4_000
 private const val MIN_EMBEDDED_PAYLOAD_CHARS = 512
-private val webUrlPrefixes = listOf("https://", "http://")
+private val webUrlPrefixes = HostFileOpenPolicy.remoteWebUrlPrefixes
 private val pairedWebUrlDelimiters = listOf(
     '(' to ')',
     '[' to ']',
@@ -569,7 +569,6 @@ internal fun MarkdownMessage(
     text: String,
     modifier: Modifier = Modifier,
     loadManagedImage: (suspend (String) -> ByteArray)? = null,
-    onOpenManagedPath: ((String) -> Unit)? = null,
     onOpenManagedFile: (suspend (String) -> HostFileOpenEvent)? = null,
 ) {
     val displayText = remember(text) { compactEmbeddedPayloads(text) }
@@ -587,16 +586,14 @@ internal fun MarkdownMessage(
         blocks.filterIsInstance<MarkdownFileChipBlock>().map { it.source }.toSet()
     }
     val openPath: (String) -> Unit = { path ->
-        onOpenManagedPath?.invoke(path)
         if (onOpenManagedFile != null) {
             scope.launch {
-                val requested = HostFileOpenPolicy.reduce(
-                    openStates[path] ?: HostFileOpenUiState.Idle,
-                    HostFileOpenEvent.Requested,
+                HostFileOpenPolicy.applyOpenAttempt(
+                    key = path,
+                    states = { openStates },
+                    setStates = { openStates = it },
+                    open = { onOpenManagedFile(path) },
                 )
-                openStates = openStates + (path to requested)
-                val next = HostFileOpenPolicy.reduce(requested, onOpenManagedFile(path))
-                openStates = openStates + (path to next)
             }
         }
     }
@@ -653,7 +650,7 @@ internal fun MarkdownMessage(
 }
 
 @Composable
-internal fun MarkdownFileChip(
+private fun MarkdownFileChip(
     displayName: String,
     state: HostFileOpenUiState,
     onClick: () -> Unit,

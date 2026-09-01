@@ -10,13 +10,9 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonPrimitive
 
 private const val FilesPreferencesDataStoreName = "files_preferences"
 private val PreviewFlagsKey = stringPreferencesKey("in_app_file_preview_by_origin")
@@ -35,6 +31,7 @@ class DataStoreFilesPreferencesRepository(
     constructor(context: Context) : this(context.applicationContext.filesPreferencesDataStore)
 
     private val json = Json { ignoreUnknownKeys = true }
+    private val previewMapSerializer = MapSerializer(String.serializer(), Boolean.serializer())
 
     override fun preferences(origin: ServerOrigin): Flow<FilesPreferences> =
         dataStore.data.map { prefs ->
@@ -60,22 +57,9 @@ class DataStoreFilesPreferencesRepository(
 
     private fun decodeMap(raw: String?): Map<String, Boolean> {
         if (raw.isNullOrBlank()) return emptyMap()
-        val element = runCatching { json.parseToJsonElement(raw) }.getOrNull() as? JsonObject
-            ?: return emptyMap()
-        return element.mapNotNull { (key, value) ->
-            val flag = value.jsonPrimitive.booleanOrNull
-                ?: value.jsonPrimitive.contentOrNull?.toBooleanStrictOrNull()
-            if (key.isBlank() || flag == null) null else key to flag
-        }.toMap()
+        return runCatching { json.decodeFromString(previewMapSerializer, raw) }.getOrDefault(emptyMap())
     }
 
     private fun encodeMap(map: Map<String, Boolean>): String =
-        json.encodeToString(
-            JsonObject.serializer(),
-            buildJsonObject {
-                map.forEach { (origin, enabled) ->
-                    put(origin, JsonPrimitive(enabled))
-                }
-            },
-        )
+        json.encodeToString(previewMapSerializer, map)
 }

@@ -3,6 +3,8 @@ package com.unsupportedpastels.hermesandroid.files
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.preferencesOf
+import androidx.datastore.preferences.core.stringPreferencesKey
 import com.unsupportedpastels.hermesandroid.connection.ServerOrigin
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,6 +33,19 @@ class FilesPreferencesRepositoryTest {
 
         assertTrue(repository.preferences(ServerOrigin.parse("https://first.example")).first().inAppFilePreviewEnabled)
         assertFalse(repository.preferences(second).first().inAppFilePreviewEnabled)
+    }
+
+    @Test
+    fun malformedPreviewMapJsonIsTreatedAsEmpty() = runTest {
+        val repository = DataStoreFilesPreferencesRepository(
+            InMemoryFilesPreferencesDataStore(
+                preferencesOf(
+                    stringPreferencesKey("in_app_file_preview_by_origin") to "{not-json",
+                ),
+            ),
+        )
+        val origin = ServerOrigin.parse("https://hermes.example")
+        assertEquals(FilesPreferences(inAppFilePreviewEnabled = false), repository.preferences(origin).first())
     }
 }
 

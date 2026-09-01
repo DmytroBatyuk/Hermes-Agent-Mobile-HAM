@@ -46,11 +46,14 @@ object HostFileOpenPolicy {
     const val OPEN_FAILED_MESSAGE = "Could not open file"
     const val DOWNLOAD_FAILED_MESSAGE = "Could not download file"
 
+    internal val remoteWebUrlPrefixes = listOf("https://", "http://")
+
+    fun isRemoteWebUrl(value: String): Boolean =
+        remoteWebUrlPrefixes.any { value.startsWith(it, ignoreCase = true) }
+
     fun markdownLinkTarget(href: String): MarkdownLinkTarget {
         val trimmed = href.trim()
-        if (trimmed.startsWith("http://", ignoreCase = true) ||
-            trimmed.startsWith("https://", ignoreCase = true)
-        ) {
+        if (isRemoteWebUrl(trimmed)) {
             return MarkdownLinkTarget.RemoteWeb(href)
         }
         val path = validCanonicalHostFilePath(href) ?: return MarkdownLinkTarget.Ignore
@@ -88,6 +91,18 @@ object HostFileOpenPolicy {
         is HostFileOpenEvent.Failed -> HostFileOpenUiState.Failed(
             event.message.take(160).takeIf { it.isNotBlank() } ?: OPEN_FAILED_MESSAGE,
         )
+    }
+
+    suspend fun applyOpenAttempt(
+        key: String,
+        states: () -> Map<String, HostFileOpenUiState>,
+        setStates: (Map<String, HostFileOpenUiState>) -> Unit,
+        open: suspend () -> HostFileOpenEvent,
+    ) {
+        val requested = reduce(states()[key] ?: HostFileOpenUiState.Idle, HostFileOpenEvent.Requested)
+        setStates(states() + (key to requested))
+        val event = open()
+        setStates(states() + (key to reduce(requested, event)))
     }
 
     fun eventForLaunchFailure(failure: HostFileLaunchFailure): HostFileOpenEvent = when (failure) {
