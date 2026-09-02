@@ -3,6 +3,7 @@ package com.unsupportedpastels.hermesandroid.files
 import com.unsupportedpastels.hermesandroid.artifacts.ArtifactOrigin
 import com.unsupportedpastels.hermesandroid.ui.validateGatewayMediaPath
 import com.unsupportedpastels.hermesandroid.ui.validateRemoteMediaUrl
+import kotlinx.coroutines.CancellationException
 
 sealed interface MarkdownLinkTarget {
     data class RemoteWeb(val url: String) : MarkdownLinkTarget
@@ -99,9 +100,18 @@ object HostFileOpenPolicy {
         setStates: (Map<String, HostFileOpenUiState>) -> Unit,
         open: suspend () -> HostFileOpenEvent,
     ) {
-        val requested = reduce(states()[key] ?: HostFileOpenUiState.Idle, HostFileOpenEvent.Requested)
+        val current = states()[key] ?: HostFileOpenUiState.Idle
+        // A repeat tap while the same file is still downloading/launching must not
+        // start a second download or fire a second external ACTION_VIEW.
+        if (current is HostFileOpenUiState.Opening) return
+        val requested = reduce(current, HostFileOpenEvent.Requested)
         setStates(states() + (key to requested))
-        val event = open()
+        val event = try {
+            open()
+        } catch (cancelled: CancellationException) {
+            setStates(states() - key)
+            throw cancelled
+        }
         setStates(states() + (key to reduce(requested, event)))
     }
 

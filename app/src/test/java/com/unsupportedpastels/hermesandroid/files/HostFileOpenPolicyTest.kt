@@ -1,9 +1,11 @@
 package com.unsupportedpastels.hermesandroid.files
 
 import com.unsupportedpastels.hermesandroid.artifacts.ArtifactOrigin
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -126,6 +128,57 @@ class HostFileOpenPolicyTest {
             HostFileOpenUiState.Failed(HostFileOpenPolicy.NO_HANDLER_MESSAGE),
             snapshots[1]["/tmp/notes.txt"],
         )
+    }
+
+    @Test
+    fun applyOpenAttemptIgnoresRepeatTapWhileSameFileIsStillOpening() = runTest {
+        var states: Map<String, HostFileOpenUiState> = mapOf("/tmp/notes.txt" to HostFileOpenUiState.Opening)
+        var openCalls = 0
+        HostFileOpenPolicy.applyOpenAttempt(
+            key = "/tmp/notes.txt",
+            states = { states },
+            setStates = { states = it },
+            open = {
+                openCalls += 1
+                HostFileOpenEvent.LaunchSucceeded
+            },
+        )
+        assertEquals(0, openCalls)
+        assertEquals(HostFileOpenUiState.Opening, states["/tmp/notes.txt"])
+    }
+
+    @Test
+    fun applyOpenAttemptStillOpensADifferentFileWhileAnotherIsOpening() = runTest {
+        var states: Map<String, HostFileOpenUiState> = mapOf("/tmp/busy.pdf" to HostFileOpenUiState.Opening)
+        var openCalls = 0
+        HostFileOpenPolicy.applyOpenAttempt(
+            key = "/tmp/notes.txt",
+            states = { states },
+            setStates = { states = it },
+            open = {
+                openCalls += 1
+                HostFileOpenEvent.LaunchSucceeded
+            },
+        )
+        assertEquals(1, openCalls)
+        assertEquals(HostFileOpenUiState.Opening, states["/tmp/busy.pdf"])
+        assertEquals(HostFileOpenUiState.Idle, states["/tmp/notes.txt"])
+    }
+
+    @Test
+    fun applyOpenAttemptDropsOpeningStateWhenTheOpenIsCancelled() = runTest {
+        var states = emptyMap<String, HostFileOpenUiState>()
+        val thrown = runCatching {
+            HostFileOpenPolicy.applyOpenAttempt(
+                key = "/tmp/notes.txt",
+                states = { states },
+                setStates = { states = it },
+                open = { throw CancellationException("scope left composition") },
+            )
+        }.exceptionOrNull()
+        assertTrue(thrown is CancellationException)
+        // Otherwise the repeat-tap guard would block every later retry of this file.
+        assertNull(states["/tmp/notes.txt"])
     }
 
     @Test

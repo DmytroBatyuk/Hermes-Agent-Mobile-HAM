@@ -6241,7 +6241,9 @@ private fun HostFileBrowserSheet(
                         },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable(enabled = !loading) {
+                            .clickable(
+                                enabled = !loading && openStates[entry.path] !is HostFileOpenUiState.Opening,
+                            ) {
                                 when (val action = HostFileOpenPolicy.hostFileRowAction(entry)) {
                                     HostFileRowAction.DrillFolder -> load(entry.path)
                                     is HostFileRowAction.OpenFile -> openPath(action.path, entry.name)

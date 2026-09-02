@@ -664,7 +664,7 @@ private fun MarkdownFileChip(
         AssistChip(
             onClick = onClick,
             enabled = state !is HostFileOpenUiState.Opening,
-            label = { Text(label) },
+            label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         )
         if (state is HostFileOpenUiState.Failed) {
             Text(
