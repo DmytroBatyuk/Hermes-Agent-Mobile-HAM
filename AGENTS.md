@@ -56,3 +56,5 @@ The current Google-authored skills live under `.agents/skills/`. Consult matchin
 - Tunnel and bootstrap reconnect belong in one platform-independent lifecycle reducer; do not add a parallel recovery machine.
 - Do not enable global cleartext HTTP traffic.
 - The application id is `com.unsupportedpastels.hermesandroid`.
+- Do not render agent-produced HTML or SVG in a WebView. Host files open in another app via the existing Share FileProvider cache; in-app preview is a later signed-in Files setting (disabled, per origin). Opening a host file is a read and is allowed while observing.
+- Do not classify remote image URLs by file extension; signed and CDN links are often extension-less and must still preview in-app.
