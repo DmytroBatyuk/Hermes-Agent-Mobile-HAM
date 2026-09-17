@@ -1,5 +1,6 @@
 package com.unsupportedpastels.hermesandroid.ui
 
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.media.MediaPlayer
@@ -286,13 +287,19 @@ import com.unsupportedpastels.hermesandroid.gateway.UnsupportedBlockingKind
 import com.unsupportedpastels.hermesandroid.gateway.SlashCompletionItem
 import com.unsupportedpastels.hermesandroid.gateway.ValidReasoningEfforts
 import com.unsupportedpastels.hermesandroid.files.HostFileContent
+import com.unsupportedpastels.hermesandroid.files.HostFileLaunchFailure
 import com.unsupportedpastels.hermesandroid.files.HostFileListing
+import com.unsupportedpastels.hermesandroid.files.HostFileOpenEvent
+import com.unsupportedpastels.hermesandroid.files.HostFileOpenPolicy
+import com.unsupportedpastels.hermesandroid.files.HostFileOpenUiState
+import com.unsupportedpastels.hermesandroid.files.HostFileRowAction
 import com.unsupportedpastels.hermesandroid.navigation.HomeRoute
 import com.unsupportedpastels.hermesandroid.navigation.ProjectRoute
 import com.unsupportedpastels.hermesandroid.navigation.RecentSessionsRoute
 import com.unsupportedpastels.hermesandroid.navigation.SessionDetailRoute
 import com.unsupportedpastels.hermesandroid.navigation.ServerSettingsRoute
 import com.unsupportedpastels.hermesandroid.navigation.SettingsServersRoute
+import com.unsupportedpastels.hermesandroid.navigation.SettingsFilesRoute
 import com.unsupportedpastels.hermesandroid.navigation.SettingsConnectionRoute
 import com.unsupportedpastels.hermesandroid.navigation.SettingsModelRoute
 import com.unsupportedpastels.hermesandroid.navigation.SettingsVoiceRoute
@@ -305,6 +312,7 @@ import com.unsupportedpastels.hermesandroid.share.SharePayload
 import com.unsupportedpastels.hermesandroid.theme.HermesAndroidTheme
 import com.unsupportedpastels.hermesandroid.theme.LocalHermesSemanticColors
 import com.unsupportedpastels.hermesandroid.voice.VoiceInputPolicy
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -425,6 +433,8 @@ fun HermesApp(
     serverSettingsState: ServerSettingsState = ServerSettingsState.Ready(null),
     transcriptCachingEnabled: Boolean = false,
     onTranscriptCachingChanged: (Boolean) -> Unit = {},
+    inAppFilePreviewEnabled: Boolean = false,
+    onInAppFilePreviewChanged: (Boolean) -> Unit = {},
     onClearOfflineCache: () -> Unit = {},
     onSaveServerOrigin: suspend (ServerOrigin) -> Result<Unit> = { Result.success(Unit) },
     serverCatalog: ServerCatalog = ServerCatalog.empty(),
@@ -734,6 +744,7 @@ fun HermesApp(
         backStack.add(
             when (section) {
                 SettingsSection.Servers -> SettingsServersRoute
+                SettingsSection.Files -> SettingsFilesRoute
                 SettingsSection.Connection -> SettingsConnectionRoute
                 SettingsSection.Model -> SettingsModelRoute
                 SettingsSection.Voice -> SettingsVoiceRoute
@@ -860,6 +871,8 @@ fun HermesApp(
                     onRemoveServer = onRemoveServerOrigin,
                     transcriptCachingEnabled = transcriptCachingEnabled,
                     onTranscriptCachingChanged = onTranscriptCachingChanged,
+                    inAppFilePreviewEnabled = inAppFilePreviewEnabled,
+                    onInAppFilePreviewChanged = onInAppFilePreviewChanged,
                     onClearOfflineCache = onClearOfflineCache,
                     onLoadManagementSettings = onLoadManagementSettings,
                     onSetProfileDefaultModel = onSetProfileDefaultModel,
@@ -1172,6 +1185,9 @@ fun HermesApp(
             }
             entry<SettingsServersRoute>(metadata = ListDetailSceneStrategy.detailPane()) {
                 renderSettingsSection(SettingsSection.Servers)
+            }
+            entry<SettingsFilesRoute>(metadata = ListDetailSceneStrategy.detailPane()) {
+                renderSettingsSection(SettingsSection.Files)
             }
             entry<SettingsConnectionRoute>(metadata = ListDetailSceneStrategy.detailPane()) {
                 renderSettingsSection(SettingsSection.Connection)
@@ -3939,6 +3955,7 @@ private fun MissingProjectScreen() {
  */
 internal enum class SettingsSection(val title: String, val summary: String) {
     Servers("Servers", "Add, switch, or remove Hermes servers"),
+    Files("Files", "How files from chat open on this phone"),
     Connection("Connection & profile", "Version, sign-in, and active profile"),
     Model("Default model", "Model and reasoning for new chats"),
     Voice("Voice", "Dictation and hands-free conversation"),
@@ -3951,6 +3968,7 @@ internal enum class SettingsSection(val title: String, val summary: String) {
 private fun NavKey?.isSettingsRoute(): Boolean = when (this) {
     ServerSettingsRoute,
     SettingsServersRoute,
+    SettingsFilesRoute,
     SettingsConnectionRoute,
     SettingsModelRoute,
     SettingsVoiceRoute,
@@ -3964,7 +3982,7 @@ private fun NavKey?.isSettingsRoute(): Boolean = when (this) {
 /**
  * Settings landing: a compact list of sections instead of one giant scroll.
  * Each row navigates to its own section route; [availableSections] hides rows
- * (Connection/Model/Voice/Offline/Jobs/Account) that require an authenticated
+ * (Connection/Model/Voice/Files/Offline/Jobs/Account) that require an authenticated
  * connection.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -4037,6 +4055,8 @@ internal fun ServerSettingsScreen(
     },
     transcriptCachingEnabled: Boolean = false,
     onTranscriptCachingChanged: (Boolean) -> Unit = {},
+    inAppFilePreviewEnabled: Boolean = false,
+    onInAppFilePreviewChanged: (Boolean) -> Unit = {},
     onClearOfflineCache: () -> Unit = {},
     onLoadManagementSettings: (String) -> Unit = {},
     onSetProfileDefaultModel: suspend (ModelSelection, Boolean) -> ModelSwitchResult = { _, _ ->
@@ -4541,6 +4561,28 @@ internal fun ServerSettingsScreen(
                         ?.takeIf { it.profile == snapshot.selectedProfile }
                     val scopedCurrentModelInfo = snapshot.currentModelInfo
                         ?.takeIf { it.profile == snapshot.selectedProfile }
+                    if (SettingsSection.Files in visibleSections) {
+                        Text("Files", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Files the agent puts in chat open in another app on this phone. In-app preview is coming soon.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("In-app file preview")
+                            Switch(
+                                checked = inAppFilePreviewEnabled,
+                                onCheckedChange = onInAppFilePreviewChanged,
+                                enabled = false,
+                                modifier = Modifier.semantics {
+                                    contentDescription = "In-app file preview"
+                                },
+                            )
+                        }
+                    }
                     if (SettingsSection.Model in visibleSections) {
                         scopedCurrentModelInfo?.let { info ->
                             Text("Current profile model", style = MaterialTheme.typography.titleMedium)
@@ -5099,6 +5141,14 @@ private fun SessionDetailScreen(
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val transcriptScope = rememberCoroutineScope()
+    val openChatHostFile: suspend (String) -> HostFileOpenEvent = { path ->
+        openManagedHostFile(
+            context = context,
+            source = path,
+            displayName = HostFileOpenPolicy.displayName(path),
+            load = onLoadManagedFile,
+        )
+    }
     val readAloudSession = rememberReadAloudSession(readAloud, session.id.value)
     var showSessionInsights by remember(session.id) { mutableStateOf(false) }
     var showHostFiles by remember(session.id) { mutableStateOf(false) }
@@ -5350,6 +5400,7 @@ private fun SessionDetailScreen(
                                     loadManagedImage = { path ->
                                         onLoadManagedImage(path).getOrThrow()
                                     },
+                                    onOpenManagedFile = openChatHostFile,
                                 )
                                 return@items
                             }
@@ -5388,6 +5439,7 @@ private fun SessionDetailScreen(
                                             loadManagedImage = { path ->
                                                 onLoadManagedImage(path).getOrThrow()
                                             },
+                                            onOpenManagedFile = openChatHostFile,
                                         )
                                     }
                                     message.role == ChatMessageRole.User -> {
@@ -5417,6 +5469,7 @@ private fun SessionDetailScreen(
                                                     loadManagedImage = { path ->
                                                         onLoadManagedImage(path).getOrThrow()
                                                     },
+                                                    onOpenManagedFile = openChatHostFile,
                                                 )
                                             }
                                         }
@@ -5436,6 +5489,7 @@ private fun SessionDetailScreen(
                                                 loadManagedImage = { path ->
                                                     onLoadManagedImage(path).getOrThrow()
                                                 },
+                                                onOpenManagedFile = openChatHostFile,
                                             )
                                         }
                                         val streamingTail = renderedText.substring(stableLength)
@@ -5453,6 +5507,7 @@ private fun SessionDetailScreen(
                                             loadManagedImage = { path ->
                                                 onLoadManagedImage(path).getOrThrow()
                                             },
+                                            onOpenManagedFile = openChatHostFile,
                                         )
                                     }
                                 }
@@ -6048,6 +6103,7 @@ private fun SessionDetailScreen(
         HostFileBrowserSheet(
             onDismiss = { showHostFiles = false },
             onLoad = onLoadHostFiles,
+            onLoadManagedFile = onLoadManagedFile,
             onAttach = { reference ->
                 onAttachHostReference(reference)
                 showHostFiles = false
@@ -6069,13 +6125,16 @@ private fun SessionDetailScreen(
 private fun HostFileBrowserSheet(
     onDismiss: () -> Unit,
     onLoad: suspend (String?) -> Result<HostFileListing>,
+    onLoadManagedFile: suspend (String) -> Result<HostFileContent>,
     onAttach: (String) -> Unit,
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var listing by remember { mutableStateOf<HostFileListing?>(null) }
     var filter by rememberSaveable { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var openStates by remember { mutableStateOf<Map<String, HostFileOpenUiState>>(emptyMap()) }
 
     fun load(path: String?) {
         scope.launch {
@@ -6089,6 +6148,24 @@ private fun HostFileBrowserSheet(
                 },
             )
             loading = false
+        }
+    }
+
+    fun openPath(path: String, displayName: String) {
+        scope.launch {
+            HostFileOpenPolicy.applyOpenAttempt(
+                key = path,
+                states = { openStates },
+                setStates = { openStates = it },
+                open = {
+                    openManagedHostFile(
+                        context = context,
+                        source = path,
+                        displayName = displayName,
+                        load = onLoadManagedFile,
+                    )
+                },
+            )
         }
     }
 
@@ -6145,17 +6222,34 @@ private fun HostFileBrowserSheet(
                     ListItem(
                         headlineContent = { Text(entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         supportingContent = {
-                            Text(
-                                if (entry.isDirectory) "Folder" else entry.mimeType ?: "File",
-                                maxLines = 1,
-                            )
+                            val openState = openStates[entry.path]
+                            when (openState) {
+                                HostFileOpenUiState.Opening -> Text(HostFileOpenPolicy.OPENING_LABEL)
+                                is HostFileOpenUiState.Failed -> Text(
+                                    openState.message,
+                                    color = MaterialTheme.colorScheme.error,
+                                    maxLines = 2,
+                                )
+                                else -> Text(
+                                    if (entry.isDirectory) "Folder" else entry.mimeType ?: "File",
+                                    maxLines = 1,
+                                )
+                            }
                         },
                         trailingContent = {
                             TextButton(onClick = { onAttach(entry.reference) }) { Text("Attach") }
                         },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable(enabled = entry.isDirectory && !loading) { load(entry.path) }
+                            .clickable(
+                                enabled = !loading && openStates[entry.path] !is HostFileOpenUiState.Opening,
+                            ) {
+                                when (val action = HostFileOpenPolicy.hostFileRowAction(entry)) {
+                                    HostFileRowAction.DrillFolder -> load(entry.path)
+                                    is HostFileRowAction.OpenFile -> openPath(action.path, entry.name)
+                                    HostFileRowAction.Ignore -> Unit
+                                }
+                            }
                             .semantics {
                                 contentDescription = if (entry.isDirectory) {
                                     "Open host folder ${entry.name}"
@@ -6191,6 +6285,7 @@ private fun ArtifactBrowserSheet(
     var query by rememberSaveable { mutableStateOf("") }
     var selectedType by rememberSaveable { mutableStateOf<ArtifactType?>(null) }
     var zoomedImage by remember { mutableStateOf<Artifact?>(null) }
+    var openStates by remember { mutableStateOf<Map<String, HostFileOpenUiState>>(emptyMap()) }
     val filteredArtifacts = artifacts.filter { artifact ->
         (selectedType == null || artifact.type == selectedType) &&
             (query.isBlank() ||
@@ -6203,14 +6298,7 @@ private fun ArtifactBrowserSheet(
             onLoadManagedFile(artifact.source).fold(
                 onSuccess = { content ->
                     runCatching {
-                        val sharedFile = withContext(Dispatchers.IO) {
-                            writeSharedArtifact(context, artifact, content.bytes)
-                        }
-                        val uri = FileProvider.getUriForFile(
-                            context,
-                            "${context.packageName}.files",
-                            sharedFile,
-                        )
+                        val uri = sharedArtifactContentUri(context, artifact, content.bytes)
                         context.startActivity(
                             Intent.createChooser(
                                 Intent(Intent.ACTION_SEND).apply {
@@ -6227,6 +6315,24 @@ private fun ArtifactBrowserSheet(
                 },
                 onFailure = { failure ->
                     error = failure.message?.take(160) ?: "Could not download artifact"
+                },
+            )
+        }
+    }
+
+    fun openManaged(artifact: Artifact) {
+        scope.launch {
+            HostFileOpenPolicy.applyOpenAttempt(
+                key = artifact.stableIdentity,
+                states = { openStates },
+                setStates = { openStates = it },
+                open = {
+                    openManagedHostFile(
+                        context = context,
+                        source = artifact.source,
+                        displayName = artifact.displayName,
+                        load = onLoadManagedFile,
+                    )
                 },
             )
         }
@@ -6351,15 +6457,36 @@ private fun ArtifactBrowserSheet(
                                 },
                             )
                             if (artifact.origin == ArtifactOrigin.ManagedPath) {
+                                val openState = openStates[artifact.stableIdentity]
+                                    ?: HostFileOpenUiState.Idle
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.End,
                                 ) {
+                                    TextButton(
+                                        enabled = openState !is HostFileOpenUiState.Opening,
+                                        onClick = { openManaged(artifact) },
+                                    ) {
+                                        Text(
+                                            if (openState is HostFileOpenUiState.Opening) {
+                                                HostFileOpenPolicy.OPENING_LABEL
+                                            } else {
+                                                "Open"
+                                            },
+                                        )
+                                    }
                                     TextButton(onClick = { shareManaged(artifact) }) { Text("Share") }
                                     TextButton(onClick = {
                                         pendingSave = artifact
                                         saveLauncher.launch(artifact.displayName)
                                     }) { Text("Save") }
+                                }
+                                if (openState is HostFileOpenUiState.Failed) {
+                                    Text(
+                                        openState.message,
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
                                 }
                             }
                             if (
@@ -6490,6 +6617,55 @@ private fun ZoomedArtifactDialog(
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
+internal suspend fun openManagedHostFile(
+    context: Context,
+    source: String,
+    displayName: String,
+    load: suspend (String) -> Result<HostFileContent>,
+    startActivity: (Intent) -> Unit = context::startActivity,
+): HostFileOpenEvent {
+    val loaded = load(source)
+    val content = loaded.getOrElse { failure ->
+        return HostFileOpenPolicy.eventForDownloadFailure(failure.message)
+    }
+    return try {
+        val artifact = Artifact(
+            stableIdentity = source,
+            type = ArtifactType.File,
+            origin = ArtifactOrigin.ManagedPath,
+            source = source,
+            displayName = displayName,
+        )
+        val uri = sharedArtifactContentUri(context, artifact, content.bytes)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, content.mimeType)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        withContext(Dispatchers.Main.immediate) {
+            startActivity(intent)
+        }
+        HostFileOpenEvent.LaunchSucceeded
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: ActivityNotFoundException) {
+        HostFileOpenPolicy.eventForLaunchFailure(HostFileLaunchFailure.NoHandler)
+    } catch (error: Exception) {
+        HostFileOpenPolicy.eventForLaunchFailure(HostFileLaunchFailure.Other(error.message))
+    }
+}
+
+private suspend fun sharedArtifactContentUri(
+    context: Context,
+    artifact: Artifact,
+    bytes: ByteArray,
+): Uri = withContext(Dispatchers.IO) {
+    FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.files",
+        writeSharedArtifact(context, artifact, bytes),
     )
 }
 
@@ -7348,6 +7524,7 @@ private fun ToolMessageBlock(
     expanded: Boolean,
     onToggle: () -> Unit,
     loadManagedImage: (suspend (String) -> ByteArray)? = null,
+    onOpenManagedFile: (suspend (String) -> HostFileOpenEvent)? = null,
 ) {
     val preview = remember(text) {
         text.replace('\n', ' ').trim().take(80)
@@ -7403,6 +7580,7 @@ private fun ToolMessageBlock(
                 MarkdownMessage(
                     text,
                     loadManagedImage = loadManagedImage,
+                    onOpenManagedFile = onOpenManagedFile,
                 )
             }
         }
@@ -7422,6 +7600,7 @@ private fun TranscriptToolRunGroup(
     onToggle: () -> Unit,
     sessionKey: String,
     loadManagedImage: (suspend (String) -> ByteArray)? = null,
+    onOpenManagedFile: (suspend (String) -> HostFileOpenEvent)? = null,
 ) {
     val semanticColors = LocalHermesSemanticColors.current
     val noun = if (tools.size == 1) "action" else "actions"
@@ -7481,6 +7660,7 @@ private fun TranscriptToolRunGroup(
                             expanded = showToolMessage,
                             onToggle = { showToolMessage = !showToolMessage },
                             loadManagedImage = loadManagedImage,
+                            onOpenManagedFile = onOpenManagedFile,
                         )
                     }
                 }

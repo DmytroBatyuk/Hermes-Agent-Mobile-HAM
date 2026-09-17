@@ -1,5 +1,7 @@
 package com.unsupportedpastels.hermesandroid.ui
 
+import com.unsupportedpastels.hermesandroid.files.HostFileOpenPolicy
+import com.unsupportedpastels.hermesandroid.files.MarkdownLinkTarget
 import kotlin.system.measureTimeMillis
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -57,6 +59,30 @@ class MessageMarkdownTest {
             blocks.filterIsInstance<MarkdownTextBlock>()
                 .any { it.plainText.contains("MEDIA:") },
         )
+    }
+
+    @Test
+    fun parsesNonPictureHostMediaDirectiveAsFileChipInsteadOfRawText() {
+        val path = "/home/mark/out/report.pdf"
+        val blocks = parseMessageMarkdown("Result:\n\nMEDIA:$path\n\nDone")
+        val chip = blocks.filterIsInstance<MarkdownFileChipBlock>().single()
+        assertEquals(path, chip.source)
+        assertEquals("report.pdf", chip.displayName)
+        assertFalse(blocks.filterIsInstance<MarkdownTextBlock>().any { it.plainText.contains("MEDIA:") })
+        assertTrue(blocks.filterIsInstance<MarkdownImageBlock>().isEmpty())
+    }
+
+    @Test
+    fun keepsPictureMediaDirectiveAsImageAndMermaidFenceAsCopyableCode() {
+        val imagePath = "/home/mark/project/design/generated-mockup.jpg"
+        val blocks = parseMessageMarkdown(
+            "Result:\n\nMEDIA:$imagePath\n\n```mermaid\nflowchart LR\nA-->B\n```\n",
+        )
+        assertEquals(imagePath, blocks.filterIsInstance<MarkdownImageBlock>().single().url)
+        val code = blocks.filterIsInstance<MarkdownCodeBlock>().single()
+        assertEquals("mermaid", code.language)
+        assertTrue(code.code.contains("flowchart LR"))
+        assertTrue(blocks.filterIsInstance<MarkdownFileChipBlock>().isEmpty())
     }
 
     @Test
@@ -272,5 +298,23 @@ class MessageMarkdownTest {
         assertEquals("First\nline", (blocks[0] as MarkdownTextBlock).plainText)
         assertEquals("Second", (blocks[1] as MarkdownTextBlock).plainText)
         assertNull((blocks[1] as MarkdownTextBlock).prefix)
+    }
+
+    @Test
+    fun hostPathMarkdownLinksAreClassifiedForOpenWhileHttpStaysWeb() {
+        val blocks = parseMessageMarkdown(
+            "See [docs](https://example.invalid/readme) and [report](/home/mark/out/report.pdf).",
+        )
+        val inlines = (blocks.single() as MarkdownTextBlock).inlines
+        assertEquals("https://example.invalid/readme", inlines.single { it.text == "docs" }.link)
+        assertEquals("/home/mark/out/report.pdf", inlines.single { it.text == "report" }.link)
+        assertEquals(
+            MarkdownLinkTarget.RemoteWeb("https://example.invalid/readme"),
+            HostFileOpenPolicy.markdownLinkTarget(inlines.single { it.text == "docs" }.link!!),
+        )
+        assertEquals(
+            MarkdownLinkTarget.ManagedHostPath("/home/mark/out/report.pdf"),
+            HostFileOpenPolicy.markdownLinkTarget(inlines.single { it.text == "report" }.link!!),
+        )
     }
 }

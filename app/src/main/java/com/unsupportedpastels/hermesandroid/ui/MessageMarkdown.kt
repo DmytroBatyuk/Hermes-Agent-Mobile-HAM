@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -24,7 +25,9 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -45,6 +48,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
+import com.unsupportedpastels.hermesandroid.files.HostFileOpenEvent
+import com.unsupportedpastels.hermesandroid.files.HostFileOpenPolicy
+import com.unsupportedpastels.hermesandroid.files.HostFileOpenUiState
+import com.unsupportedpastels.hermesandroid.files.MarkdownLinkTarget
+import com.unsupportedpastels.hermesandroid.files.MediaLineKind
+import kotlinx.coroutines.launch
 
 internal sealed interface MarkdownBlock
 
@@ -84,6 +93,11 @@ internal data class MarkdownImageBlock(
     val url: String,
 ) : MarkdownBlock
 
+internal data class MarkdownFileChipBlock(
+    val source: String,
+    val displayName: String,
+) : MarkdownBlock
+
 internal enum class MarkdownTableAlignment {
     Start,
     Center,
@@ -112,7 +126,7 @@ private val imageAttachmentMarkerPattern = Regex(
 )
 private const val MESSAGE_RENDER_CHUNK_CHARS = 4_000
 private const val MIN_EMBEDDED_PAYLOAD_CHARS = 512
-private val webUrlPrefixes = listOf("https://", "http://")
+private val webUrlPrefixes = HostFileOpenPolicy.remoteWebUrlPrefixes
 private val pairedWebUrlDelimiters = listOf(
     '(' to ')',
     '[' to ']',
@@ -305,12 +319,20 @@ internal fun parseMessageMarkdown(source: String): List<MarkdownBlock> {
         val trimmedStart = line.trimStart()
         val media = mediaDirectivePattern.matchEntire(trimmedStart)
         if (media != null) {
-            val source = media.groupValues[1]
-            if (validateRemoteMediaUrl(source) || validateGatewayMediaPath(source)) {
-                flushParagraph()
-                blocks += MarkdownImageBlock(source)
-                index += 1
-                continue
+            when (val kind = HostFileOpenPolicy.mediaLineKind(media.groupValues[1])) {
+                is MediaLineKind.InAppImage -> {
+                    flushParagraph()
+                    blocks += MarkdownImageBlock(kind.source)
+                    index += 1
+                    continue
+                }
+                is MediaLineKind.FileChip -> {
+                    flushParagraph()
+                    blocks += MarkdownFileChipBlock(kind.source, kind.displayName)
+                    index += 1
+                    continue
+                }
+                MediaLineKind.Ignore -> Unit
             }
         }
         if (trimmedStart.startsWith("```")) {
@@ -547,6 +569,7 @@ internal fun MarkdownMessage(
     text: String,
     modifier: Modifier = Modifier,
     loadManagedImage: (suspend (String) -> ByteArray)? = null,
+    onOpenManagedFile: (suspend (String) -> HostFileOpenEvent)? = null,
 ) {
     val displayText = remember(text) { compactEmbeddedPayloads(text) }
     var requestedCharacters by rememberSaveable(displayText) {
@@ -557,6 +580,23 @@ internal fun MarkdownMessage(
     }
     val visibleText = remember(displayText, visibleEnd) { displayText.substring(0, visibleEnd) }
     val blocks = remember(visibleText) { parseMessageMarkdown(visibleText) }
+    val scope = rememberCoroutineScope()
+    var openStates by remember { mutableStateOf<Map<String, HostFileOpenUiState>>(emptyMap()) }
+    val chipSources = remember(blocks) {
+        blocks.filterIsInstance<MarkdownFileChipBlock>().map { it.source }.toSet()
+    }
+    val openPath: (String) -> Unit = { path ->
+        if (onOpenManagedFile != null) {
+            scope.launch {
+                HostFileOpenPolicy.applyOpenAttempt(
+                    key = path,
+                    states = { openStates },
+                    setStates = { openStates = it },
+                    open = { onOpenManagedFile(path) },
+                )
+            }
+        }
+    }
 
     Column(
         modifier = modifier,
@@ -569,13 +609,27 @@ internal fun MarkdownMessage(
             ) {
                 blocks.forEach { block ->
                     when (block) {
-                        is MarkdownTextBlock -> MarkdownText(block)
+                        is MarkdownTextBlock -> MarkdownText(block, openPath)
                         is MarkdownCodeBlock -> MarkdownCode(block)
                         is MarkdownImageBlock -> RemoteMediaImage(
                             source = block.url,
                             loadManagedImage = loadManagedImage,
                         )
-                        is MarkdownTableBlock -> MarkdownTable(block)
+                        is MarkdownFileChipBlock -> MarkdownFileChip(
+                            displayName = block.displayName,
+                            state = openStates[block.source] ?: HostFileOpenUiState.Idle,
+                            onClick = { openPath(block.source) },
+                        )
+                        is MarkdownTableBlock -> MarkdownTable(block, openPath)
+                    }
+                }
+                openStates.forEach { (path, state) ->
+                    if (path !in chipSources && state is HostFileOpenUiState.Failed) {
+                        Text(
+                            state.message,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
                 }
             }
@@ -591,6 +645,33 @@ internal fun MarkdownMessage(
             ) {
                 Text("Show more")
             }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownFileChip(
+    displayName: String,
+    state: HostFileOpenUiState,
+    onClick: () -> Unit,
+) {
+    val label = if (state is HostFileOpenUiState.Opening) {
+        HostFileOpenPolicy.OPENING_LABEL
+    } else {
+        displayName
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        AssistChip(
+            onClick = onClick,
+            enabled = state !is HostFileOpenUiState.Opening,
+            label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        )
+        if (state is HostFileOpenUiState.Failed) {
+            Text(
+                state.message,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }
@@ -611,7 +692,10 @@ private val MarkdownTableCellMinWidth = 96.dp
 private val MarkdownTableCellMaxWidth = 240.dp
 
 @Composable
-private fun MarkdownTable(block: MarkdownTableBlock) {
+private fun MarkdownTable(
+    block: MarkdownTableBlock,
+    onOpenManagedPath: ((String) -> Unit)? = null,
+) {
     val scrollState = rememberScrollState()
     val columnCount = maxOf(block.header.size, block.rows.maxOfOrNull { it.size } ?: 0)
     if (columnCount == 0) return
@@ -638,6 +722,7 @@ private fun MarkdownTable(block: MarkdownTableBlock) {
                                 alignment = block.alignments.getOrElse(column) {
                                     MarkdownTableAlignment.Start
                                 },
+                                onOpenManagedPath = onOpenManagedPath,
                             )
                         }
                     }
@@ -709,9 +794,10 @@ private fun MarkdownTableCellText(
     cell: MarkdownTableCell?,
     header: Boolean,
     alignment: MarkdownTableAlignment,
+    onOpenManagedPath: ((String) -> Unit)? = null,
 ) {
     Text(
-        text = cell?.let { annotatedMarkdown(it.inlines) } ?: AnnotatedString(""),
+        text = cell?.let { annotatedMarkdown(it.inlines, onOpenManagedPath) } ?: AnnotatedString(""),
         modifier = Modifier
             .background(
                 if (header) {
@@ -737,8 +823,11 @@ private fun MarkdownTableCellText(
 }
 
 @Composable
-private fun MarkdownText(block: MarkdownTextBlock) {
-    val annotated = annotatedMarkdown(block.inlines)
+private fun MarkdownText(
+    block: MarkdownTextBlock,
+    onOpenManagedPath: ((String) -> Unit)? = null,
+) {
+    val annotated = annotatedMarkdown(block.inlines, onOpenManagedPath)
     val textStyle = when (block.kind) {
         MarkdownTextKind.Heading -> when (block.headingLevel) {
             1 -> MaterialTheme.typography.headlineSmall
@@ -789,7 +878,10 @@ private fun MarkdownText(block: MarkdownTextBlock) {
 }
 
 @Composable
-private fun annotatedMarkdown(inlines: List<MarkdownInline>): AnnotatedString {
+private fun annotatedMarkdown(
+    inlines: List<MarkdownInline>,
+    onOpenManagedPath: ((String) -> Unit)? = null,
+): AnnotatedString {
     val codeBackground = MaterialTheme.colorScheme.surfaceVariant
     val linkColor = MaterialTheme.colorScheme.primary
     return buildAnnotatedString {
@@ -809,15 +901,17 @@ private fun annotatedMarkdown(inlines: List<MarkdownInline>): AnnotatedString {
                     else -> null
                 },
             )
-            val webUrl = inline.link?.takeIf { url ->
-                webUrlPrefixes.any { prefix -> url.startsWith(prefix, ignoreCase = true) }
-            }
-            if (webUrl != null) {
-                withLink(LinkAnnotation.Url(webUrl)) {
+            when (val target = inline.link?.let(HostFileOpenPolicy::markdownLinkTarget)) {
+                is MarkdownLinkTarget.RemoteWeb -> withLink(LinkAnnotation.Url(target.url)) {
                     withStyle(style) { append(inline.text) }
                 }
-            } else {
-                withStyle(style) { append(inline.text) }
+                is MarkdownLinkTarget.ManagedHostPath -> {
+                    val click = LinkAnnotation.Clickable("host-file") {
+                        onOpenManagedPath?.invoke(target.path)
+                    }
+                    withLink(click) { withStyle(style) { append(inline.text) } }
+                }
+                else -> withStyle(style) { append(inline.text) }
             }
         }
     }
